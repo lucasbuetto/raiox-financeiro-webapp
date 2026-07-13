@@ -56,8 +56,11 @@ function useFlipLayout(containerRef: React.RefObject<HTMLElement | null>, select
         { duration: 240, easing: "cubic-bezier(0.2, 0.8, 0.2, 1)" },
       );
       runningAnimations.current.set(id, animation);
-      animation.onfinish = () => runningAnimations.current.delete(id);
-      animation.oncancel = () => runningAnimations.current.delete(id);
+      const removeFinishedAnimation = () => {
+        if (runningAnimations.current.get(id) === animation) runningAnimations.current.delete(id);
+      };
+      animation.onfinish = removeFinishedAnimation;
+      animation.oncancel = removeFinishedAnimation;
     });
 
     previousPositions.current = currentPositions;
@@ -214,6 +217,7 @@ function FinanceApp({ session }: { session: Session }) {
   const dragState = useRef<DragState>(null);
   const sectionPreviewRef = useRef<SectionKey[] | null>(null);
   const itemPreviewRef = useRef<ItemPreview>(null);
+  const hoverTargetRef = useRef<string | null>(null);
   const sectionGridRef = useRef<HTMLElement>(null);
 
   useFlipLayout(sectionGridRef, ".masonry-item[data-flip-id]");
@@ -288,6 +292,7 @@ function FinanceApp({ session }: { session: Session }) {
     dragState.current = null;
     sectionPreviewRef.current = null;
     itemPreviewRef.current = null;
+    hoverTargetRef.current = null;
     setSectionPreview(null);
     setItemPreview(null);
   }
@@ -298,19 +303,22 @@ function FinanceApp({ session }: { session: Session }) {
     event.dataTransfer.setData("text/plain", section);
     const preview = [...data.sectionOrder];
     dragState.current = { type: "section", id: section };
+    hoverTargetRef.current = null;
     sectionPreviewRef.current = preview;
     setSectionPreview(preview);
   }
 
   function previewSection(target: SectionKey) {
     const currentDrag = dragState.current;
-    if (!currentDrag || currentDrag.type !== "section" || currentDrag.id === target) return;
-    setSectionPreview((current) => {
-      const order = current ?? data.sectionOrder;
-      const next = moveItem(order, order.indexOf(currentDrag.id), order.indexOf(target));
-      sectionPreviewRef.current = next;
-      return next;
-    });
+    if (!currentDrag || currentDrag.type !== "section") return;
+    const hoverTarget = `section:${target}`;
+    if (hoverTargetRef.current === hoverTarget) return;
+    hoverTargetRef.current = hoverTarget;
+    if (currentDrag.id === target) return;
+    const order = sectionPreviewRef.current ?? data.sectionOrder;
+    const next = moveItem(order, order.indexOf(currentDrag.id), order.indexOf(target));
+    sectionPreviewRef.current = next;
+    setSectionPreview(next);
   }
 
   function commitSectionDrag() {
@@ -328,26 +336,30 @@ function FinanceApp({ session }: { session: Session }) {
     event.dataTransfer.setData("text/plain", id);
     const preview = { section, items: [...data[section]] };
     dragState.current = { type: "item", section, id };
+    hoverTargetRef.current = null;
     itemPreviewRef.current = preview;
     setItemPreview(preview);
   }
 
   function previewItem(section: SectionKey, targetId: string) {
     const currentDrag = dragState.current;
-    if (!currentDrag || currentDrag.type !== "item" || currentDrag.section !== section || currentDrag.id === targetId) return;
-    setItemPreview((current) => {
-      const items = current?.section === section ? current.items : data[section];
-      const next = {
-        section,
-        items: moveItem(
-          items,
-          items.findIndex((item) => item.id === currentDrag.id),
-          items.findIndex((item) => item.id === targetId),
-        ),
-      };
-      itemPreviewRef.current = next;
-      return next;
-    });
+    if (!currentDrag || currentDrag.type !== "item" || currentDrag.section !== section) return;
+    const hoverTarget = `item:${section}:${targetId}`;
+    if (hoverTargetRef.current === hoverTarget) return;
+    hoverTargetRef.current = hoverTarget;
+    if (currentDrag.id === targetId) return;
+    const current = itemPreviewRef.current;
+    const items = current?.section === section ? current.items : data[section];
+    const next = {
+      section,
+      items: moveItem(
+        items,
+        items.findIndex((item) => item.id === currentDrag.id),
+        items.findIndex((item) => item.id === targetId),
+      ),
+    };
+    itemPreviewRef.current = next;
+    setItemPreview(next);
   }
 
   function commitItemDrag(section: SectionKey) {
@@ -563,34 +575,48 @@ function FinanceApp({ session }: { session: Session }) {
         )}
       </section>
 
-      <section className="section-grid">
-        {data.sectionOrder.map((section) => (
+      <section ref={sectionGridRef} className="section-grid">
+        {(sectionPreview ?? data.sectionOrder).map((section) => {
+          const visibleItems = itemPreview?.section === section ? itemPreview.items : data[section];
+          return (
+          <MasonryItem key={section} flipId={`section-${section}`}>
           <SectionCard
-            key={section}
             section={section}
-            items={data[section]}
+            items={visibleItems}
             preferences={preferences}
             total={sumCents(data[section])}
+            isDragging={dragState.current?.type === "section" && dragState.current.id === section}
+            draggedItemId={dragState.current?.type === "item" && dragState.current.section === section ? dragState.current.id : null}
             onAdd={() => addItem(section)}
             onUpdate={(id, patch) => updateItem(section, id, patch)}
             onRemove={(id) => removeItem(section, id)}
-            onDragStart={(event) => {
-              event.stopPropagation();
-              dragState.current = { type: "section", id: section };
-            }}
+            onDragStart={(event) => beginSectionDrag(event, section)}
+            onDragEnterSection={() => previewSection(section)}
             onDropSection={(event) => {
               event.preventDefault();
-              reorderSection(section);
-            }}
-            onItemDragStart={(event, id) => {
               event.stopPropagation();
-              dragState.current = { type: "item", section, id };
+              if (dragState.current?.type === "item") {
+                commitItemDrag(section);
+              } else {
+                previewSection(section);
+                commitSectionDrag();
+              }
             }}
+            onDragEnd={clearDragPreview}
+            onItemDragStart={(event, id) => beginItemDrag(event, section, id)}
+            onItemDragEnter={(id) => previewItem(section, id)}
             onDropItem={(event, id) => {
               event.preventDefault();
               event.stopPropagation();
-              reorderItem(section, id);
+              if (dragState.current?.type === "section") {
+                previewSection(section);
+                commitSectionDrag();
+              } else {
+                previewItem(section, id);
+                commitItemDrag(section);
+              }
             }}
+            onItemDragEnd={clearDragPreview}
           >
             {section === "dividas" && (
               <>
@@ -614,8 +640,11 @@ function FinanceApp({ session }: { session: Session }) {
               </>
             )}
           </SectionCard>
-        ))}
+          </MasonryItem>
+          );
+        })}
 
+        <MasonryItem flipId="section-cash">
         <section className="panel cash-panel">
           <h3>
             <i style={{ background: COLORS.sky }} /> Caixa e reserva
@@ -638,6 +667,7 @@ function FinanceApp({ session }: { session: Session }) {
               : `Faltam ${formatMoney(Math.max(data.reservaCents - data.caixaCents, 0), preferences)} para completar sua reserva.`}
           </p>
         </section>
+        </MasonryItem>
       </section>
 
       <footer>
@@ -700,37 +730,61 @@ function SectionCard({
   items,
   preferences,
   total,
+  isDragging,
+  draggedItemId,
   onAdd,
   onUpdate,
   onRemove,
   onDragStart,
+  onDragEnterSection,
   onDropSection,
+  onDragEnd,
   onItemDragStart,
+  onItemDragEnter,
   onDropItem,
+  onItemDragEnd,
   children,
 }: {
   section: SectionKey;
   items: FinanceItem[];
   preferences: Preferences;
   total: number;
+  isDragging: boolean;
+  draggedItemId: string | null;
   onAdd: () => void;
   onUpdate: (id: string, patch: Partial<FinanceItem>) => void;
   onRemove: (id: string) => void;
   onDragStart: (event: React.DragEvent<HTMLElement>) => void;
+  onDragEnterSection: () => void;
   onDropSection: (event: React.DragEvent<HTMLElement>) => void;
+  onDragEnd: () => void;
   onItemDragStart: (event: React.DragEvent<HTMLDivElement>, id: string) => void;
+  onItemDragEnter: (id: string) => void;
   onDropItem: (event: React.DragEvent<HTMLDivElement>, id: string) => void;
+  onItemDragEnd: () => void;
   children?: React.ReactNode;
 }) {
   const meta = SECTION_META[section];
+  const rowsRef = useRef<HTMLDivElement>(null);
+  useFlipLayout(rowsRef, ".line-item[data-flip-id]");
+
+  const cardClassName = ["section-card", meta.highlight ? "highlight" : "", isDragging ? "is-dragging" : ""]
+    .filter(Boolean)
+    .join(" ");
   return (
     <section
-      className={meta.highlight ? "section-card highlight" : "section-card"}
+      className={cardClassName}
       style={{ "--accent": meta.accent } as React.CSSProperties}
       draggable
+      aria-grabbed={isDragging}
       onDragStart={onDragStart}
-      onDragOver={(event) => event.preventDefault()}
+      onDragEnter={onDragEnterSection}
+      onDragOver={(event) => {
+        event.preventDefault();
+        event.dataTransfer.dropEffect = "move";
+      }}
       onDrop={onDropSection}
+      onDragEnd={onDragEnd}
     >
       <div className="section-head">
         <h3>
@@ -743,18 +797,21 @@ function SectionCard({
         <strong>{formatMoney(total, preferences)}</strong>
       </div>
       <p>{meta.helper}</p>
-      <div className="rows">
+      <div ref={rowsRef} className="rows">
         {items.map((item) => (
           <LineItem
             key={item.id}
             item={item}
             accent={meta.accent}
             preferences={preferences}
+            isDragging={draggedItemId === item.id}
             onLabel={(label) => onUpdate(item.id, { label })}
             onValue={(cents) => onUpdate(item.id, { cents })}
             onRemove={() => onRemove(item.id)}
             onDragStart={(event) => onItemDragStart(event, item.id)}
+            onDragEnter={() => onItemDragEnter(item.id)}
             onDrop={(event) => onDropItem(event, item.id)}
+            onDragEnd={onItemDragEnd}
           />
         ))}
       </div>
@@ -770,23 +827,45 @@ function LineItem({
   item,
   accent,
   preferences,
+  isDragging,
   onLabel,
   onValue,
   onRemove,
   onDragStart,
+  onDragEnter,
   onDrop,
+  onDragEnd,
 }: {
   item: FinanceItem;
   accent: string;
   preferences: Preferences;
+  isDragging: boolean;
   onLabel: (value: string) => void;
   onValue: (value: number) => void;
   onRemove: () => void;
   onDragStart: (event: React.DragEvent<HTMLDivElement>) => void;
+  onDragEnter: () => void;
   onDrop: (event: React.DragEvent<HTMLDivElement>) => void;
+  onDragEnd: () => void;
 }) {
   return (
-    <div className="line-item" draggable onDragStart={onDragStart} onDragOver={(event) => event.preventDefault()} onDrop={onDrop}>
+    <div
+      className={isDragging ? "line-item is-dragging" : "line-item"}
+      data-flip-id={`item-${item.id}`}
+      draggable
+      aria-grabbed={isDragging}
+      onDragStart={onDragStart}
+      onDragEnter={onDragEnter}
+      onDragOver={(event) => {
+        event.preventDefault();
+        event.dataTransfer.dropEffect = "move";
+      }}
+      onDrop={onDrop}
+      onDragEnd={(event) => {
+        event.stopPropagation();
+        onDragEnd();
+      }}
+    >
       <button className="row-drag" type="button" aria-label="Arrastar linha">
         <GripVertical size={14} />
       </button>
